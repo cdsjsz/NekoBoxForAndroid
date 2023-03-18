@@ -94,7 +94,7 @@ jobs:
           sudo apt update && sudo apt install jq -y;
           VERSION=$(curl -sL https://api.github.com/repos/MatsuriDayo/NekoBoxForAndroid/releases | jq -r ".[0].name")
           find artifacts -name "*.apk" -exec cp {} apks \;
-          ./ghr -delete -t "${{ github.token }}" -n $VERSION $VERSION apks
+          ./ghr -delete -t "${{ secrets.TOKEN }}" -n $VERSION $VERSION apks
   upload:
     name: Upload Release
     runs-on: ubuntu-latest
