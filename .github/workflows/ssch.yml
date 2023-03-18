@@ -53,6 +53,10 @@ jobs:
         with:
           path: ~/.gradle
           key: gradle-oss-${{ hashFiles('**/*.gradle.kts') }}
+      - name: Replace
+        run: |
+          sed -i 's/moe.nb4a/moe.total/g' nb4a.properties;
+          sed -i 's/NekoBox/MyBox/g' app/src/main/res/values/strings.xml  
       - name: Gradle Build
         env:
           BUILD_PLUGIN: none
