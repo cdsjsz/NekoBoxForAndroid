@@ -1,5 +1,7 @@
 name: schedule Build
 on:
+  schedule:
+    - cron: "14 17 * * *"
   workflow_dispatch:
 jobs:
   libcore:
