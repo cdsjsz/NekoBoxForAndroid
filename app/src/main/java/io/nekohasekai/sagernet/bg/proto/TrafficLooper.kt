@@ -5,6 +5,7 @@ import io.nekohasekai.sagernet.aidl.TrafficData
 import io.nekohasekai.sagernet.bg.BaseService
 import io.nekohasekai.sagernet.database.DataStore
 import io.nekohasekai.sagernet.database.ProfileManager
+import io.nekohasekai.sagernet.fmt.TAG_BYPASS
 import io.nekohasekai.sagernet.fmt.TAG_PROXY
 import io.nekohasekai.sagernet.ktx.Logs
 import kotlinx.coroutines.*
@@ -17,7 +18,7 @@ class TrafficLooper
 ) {
 
     private var job: Job? = null
-    private val items = mutableMapOf<Long, TrafficUpdater.TrafficLooperData>()
+    private val items = mutableMapOf<Long, TrafficUpdater.TrafficLooperData>() // associate ent id
 
     suspend fun stop() {
         job?.cancel()
@@ -49,6 +50,19 @@ class TrafficLooper
         job = sc.launch { loop() }
     }
 
+    var selectorNowId = -114514L
+    var selectorNowFakeTag = ""
+
+    fun selectMain(id: Long) {
+        Logs.d("select traffic count $TAG_PROXY to $id, old id is $selectorNowId")
+        val oldData = items[selectorNowId]
+        val data = items[id] ?: return
+        oldData?.tag = selectorNowFakeTag
+        selectorNowFakeTag = data.tag
+        data.tag = TAG_PROXY
+        selectorNowId = id
+    }
+
     private suspend fun loop() {
         val delayMs = DataStore.speedInterval
         val showDirectSpeed = DataStore.showDirectSpeed
@@ -72,31 +86,33 @@ class TrafficLooper
                 itemBypass = TrafficUpdater.TrafficLooperData(tag = "bypass")
                 items[-1] = itemBypass
                 //
-                val tags = hashSetOf("bypass")
+                val tags = hashSetOf(TAG_PROXY, TAG_BYPASS)
                 proxy.config.trafficMap.forEach { (tag, ents) ->
+                    tags.add(tag)
                     for (ent in ents) {
                         val item = TrafficUpdater.TrafficLooperData(
                             tag = tag,
                             rx = ent.rx,
                             tx = ent.tx,
                         )
-                        if (proxy.config.selectorGroupId < 0L && ent.id == proxy.config.mainEntId) {
+                        if (tag == TAG_PROXY && itemMain == null) {
                             itemMain = item
                             itemMainBase = TrafficUpdater.TrafficLooperData(
                                 tag = tag,
                                 rx = ent.rx,
                                 tx = ent.tx,
                             )
-                            Logs.d("traffic count $tag to main")
+                            Logs.d("traffic count $tag to main to ${ent.id}")
                         }
                         items[ent.id] = item
-                        tags.add(tag)
                         Logs.d("traffic count $tag to ${ent.id}")
                     }
                 }
                 if (proxy.config.selectorGroupId >= 0L) {
                     itemMain = TrafficUpdater.TrafficLooperData(tag = TAG_PROXY)
                     itemMainBase = TrafficUpdater.TrafficLooperData(tag = TAG_PROXY)
+                    items[-2] = itemMain!!
+                    selectMain(proxy.config.mainEntId)
                 }
                 //
                 trafficUpdater = TrafficUpdater(
@@ -121,9 +137,9 @@ class TrafficLooper
             // traffic
             val traffic = mutableMapOf<Long, TrafficData>()
             if (DataStore.profileTrafficStatistics) {
-                proxy.config.trafficMap.forEach { (tag, ents) ->
+                proxy.config.trafficMap.forEach { (_, ents) ->
                     for (ent in ents) {
-                        val item = items[ent.id] ?: return@forEach
+                        val item = items[ent.id] ?: continue
                         ent.rx = item.rx
                         ent.tx = item.tx
 //                    ProfileManager.updateProfile(ent) // update DB

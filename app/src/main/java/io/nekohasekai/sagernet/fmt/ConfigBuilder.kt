@@ -5,7 +5,6 @@ import io.nekohasekai.sagernet.Key
 import io.nekohasekai.sagernet.bg.VpnService
 import io.nekohasekai.sagernet.database.DataStore
 import io.nekohasekai.sagernet.database.ProxyEntity
-import io.nekohasekai.sagernet.database.ProxyEntity.Companion.TYPE_CHAIN
 import io.nekohasekai.sagernet.database.ProxyEntity.Companion.TYPE_CONFIG
 import io.nekohasekai.sagernet.database.SagerDatabase
 import io.nekohasekai.sagernet.fmt.ConfigBuildResult.IndexEntity
@@ -96,7 +95,7 @@ fun buildConfig(
         }
     }
 
-    val trafficMap = HashMap<String, MutableList<ProxyEntity>>()
+    val trafficMap = HashMap<String, List<ProxyEntity>>()
     val tagMap = HashMap<Long, String>()
     val globalOutbounds = ArrayList<Long>()
     val group = SagerDatabase.groupDao.getById(proxy.groupId)
@@ -140,6 +139,7 @@ fun buildConfig(
     val uidListDNSDirect = mutableListOf<Int>()
     val domainListDNSRemote = mutableListOf<String>()
     val domainListDNSDirect = mutableListOf<String>()
+    val domainListDNSDirectForce = mutableListOf<String>()
     val domainListDNSBlock = mutableListOf<String>()
     val bypassDNSBeans = hashSetOf<AbstractBean>()
     val isVPN = DataStore.serviceMode == Key.MODE_VPN
@@ -156,6 +156,16 @@ fun buildConfig(
     val ipv6Mode = if (forTest) IPv6Mode.ENABLE else DataStore.ipv6Mode
     val resolveDestination = DataStore.resolveDestination
     val alerts = mutableListOf<Pair<Int, String>>()
+
+    fun genDomainStrategy(noAsIs: Boolean): String {
+        return when {
+            !resolveDestination && !noAsIs -> ""
+            ipv6Mode == IPv6Mode.DISABLE -> "ipv4_only"
+            ipv6Mode == IPv6Mode.PREFER -> "prefer_ipv6"
+            ipv6Mode == IPv6Mode.ONLY -> "ipv6_only"
+            else -> "prefer_ipv4"
+        }
+    }
 
     return MyOptions().apply {
         if (!forTest && DataStore.enableClashAPI) experimental = ExperimentalOptions().apply {
@@ -206,6 +216,7 @@ fun buildConfig(
                 stack = if (DataStore.tunImplementation == 1) "system" else "gvisor"
                 sniff = needSniff
                 endpoint_independent_nat = true
+                domain_strategy = genDomainStrategy(false)
                 when (ipv6Mode) {
                     IPv6Mode.DISABLE -> {
                         inet4_address = listOf(VpnService.PRIVATE_VLAN4_CLIENT + "/28")
@@ -224,6 +235,7 @@ fun buildConfig(
                 tag = TAG_MIXED
                 listen = bind
                 listen_port = DataStore.mixedPort
+                domain_strategy = genDomainStrategy(false)
                 if (needSniff) {
                     sniff = true
 //                destOverride = when {
@@ -245,6 +257,7 @@ fun buildConfig(
                     listen = bind
                     listen_port = DataStore.transproxyPort
                     sniff = needSniff
+                    domain_strategy = genDomainStrategy(false)
                 })
             } else {
                 inbounds.add(Inbound_RedirectOptions().apply {
@@ -253,6 +266,7 @@ fun buildConfig(
                     listen = bind
                     listen_port = DataStore.transproxyPort
                     sniff = needSniff
+                    domain_strategy = genDomainStrategy(false)
                 })
             }
         }
@@ -270,6 +284,11 @@ fun buildConfig(
             chainId: Long, entity: ProxyEntity
         ): String {
             val profileList = entity.resolveChain()
+            val chainTrafficSet = HashSet<ProxyEntity>().apply {
+                plusAssign(profileList)
+                add(entity)
+            }
+
             var currentOutbound = mutableMapOf<String, Any>()
             lateinit var pastOutbound: MutableMap<String, Any>
             lateinit var pastInboundTag: String
@@ -282,16 +301,6 @@ fun buildConfig(
             var chainTagOut = ""
             val chainTag = "c-$chainId"
             var muxApplied = false
-
-            fun genDomainStrategy(noAsIs: Boolean): String {
-                return when {
-                    !resolveDestination && !noAsIs -> ""
-                    ipv6Mode == IPv6Mode.DISABLE -> "ipv4_only"
-                    ipv6Mode == IPv6Mode.PREFER -> "prefer_ipv6"
-                    ipv6Mode == IPv6Mode.ONLY -> "ipv6_only"
-                    else -> "prefer_ipv4"
-                }
-            }
 
             var currentDomainStrategy = genDomainStrategy(false)
 
@@ -341,11 +350,6 @@ fun buildConfig(
                     }
                     globalOutbounds.add(proxyEntity.id)
                 }
-
-                // include g-xx & chain ent
-                val mapList = mutableListOf(proxyEntity)
-                if (index == 0 && entity.type == TYPE_CHAIN) mapList.add(proxy) // chain ent
-                trafficMap[tagOut] = mapList
 
                 // Chain outbound
                 if (proxyEntity.needExternal()) {
@@ -405,7 +409,7 @@ fun buildConfig(
                 pastEntity?.requireBean()?.apply {
                     // don't loopback
                     if (currentDomainStrategy != "" && !serverAddress.isIpAddress()) {
-                        domainListDNSDirect.add("full:$serverAddress")
+                        domainListDNSDirectForce.add("full:$serverAddress")
                     }
                 }
                 if (forTest) {
@@ -465,6 +469,7 @@ fun buildConfig(
                 pastEntity = proxyEntity
             }
 
+            trafficMap[chainTagOut] = chainTrafficSet.toList()
             return chainTagOut
         }
 
@@ -628,7 +633,7 @@ fun buildConfig(
             }
 
             if (!serverAddr.isIpAddress()) {
-                domainListDNSDirect.add("full:${serverAddr}")
+                domainListDNSDirectForce.add("full:${serverAddr}")
             }
         }
 
@@ -639,7 +644,7 @@ fun buildConfig(
             }
             "https://$address".toHttpUrlOrNull()?.apply {
                 if (!host.isIpAddress()) {
-                    domainListDNSDirect.add("full:$host")
+                    domainListDNSDirectForce.add("full:$host")
                 }
             }
         }
@@ -675,36 +680,58 @@ fun buildConfig(
             address = "rcode://success"
             tag = "dns-block"
         })
+        if (domainListDNSDirectForce.isNotEmpty()) {
+            dns.rules.add(
+                DNSRule_DefaultOptions().apply {
+                    makeSingBoxRule(domainListDNSDirectForce.toHashSet().toList())
+                    server = "dns-direct"
+                }
+            )
+        }
 
         // dns object user rules
         if (enableDnsRouting) {
-            if (domainListDNSRemote.isNotEmpty() || uidListDNSRemote.isNotEmpty()) {
+            if (uidListDNSRemote.isNotEmpty()) {
                 dns.rules.add(
                     DNSRule_DefaultOptions().apply {
-                        makeSingBoxRule(domainListDNSRemote.toHashSet().toList())
                         user_id = uidListDNSRemote.toHashSet().toList()
                         server = "dns-remote"
                     }
                 )
             }
-            if (domainListDNSDirect.isNotEmpty() || uidListDNSDirect.isNotEmpty()) {
+            if (domainListDNSRemote.isNotEmpty()) {
                 dns.rules.add(
                     DNSRule_DefaultOptions().apply {
-                        makeSingBoxRule(domainListDNSDirect.toHashSet().toList())
+                        makeSingBoxRule(domainListDNSRemote.toHashSet().toList())
+                        server = "dns-remote"
+                    }
+                )
+            }
+            if (uidListDNSDirect.isNotEmpty()) {
+                dns.rules.add(
+                    DNSRule_DefaultOptions().apply {
                         user_id = uidListDNSDirect.toHashSet().toList()
                         server = "dns-direct"
                     }
                 )
             }
-        }
-        if (domainListDNSBlock.isNotEmpty()) {
-            dns.rules.add(
-                DNSRule_DefaultOptions().apply {
-                    makeSingBoxRule(domainListDNSBlock.toHashSet().toList())
-                    server = "dns-block"
-                    disable_cache = true
-                }
-            )
+            if (domainListDNSDirect.isNotEmpty()) {
+                dns.rules.add(
+                    DNSRule_DefaultOptions().apply {
+                        makeSingBoxRule(domainListDNSDirect.toHashSet().toList())
+                        server = "dns-direct"
+                    }
+                )
+            }
+            if (domainListDNSBlock.isNotEmpty()) {
+                dns.rules.add(
+                    DNSRule_DefaultOptions().apply {
+                        makeSingBoxRule(domainListDNSBlock.toHashSet().toList())
+                        server = "dns-block"
+                        disable_cache = true
+                    }
+                )
+            }
         }
 
         // Disable DNS for test
@@ -737,6 +764,7 @@ fun buildConfig(
             dns.rules.add(DNSRule_DefaultOptions().apply {
                 domain_suffix = listOf(".arpa.", ".arpa")
                 server = "dns-block"
+                disable_cache = true
             })
         }
 
