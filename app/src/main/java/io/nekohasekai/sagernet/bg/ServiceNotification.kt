@@ -13,9 +13,7 @@ import androidx.core.app.NotificationManagerCompat
 import io.nekohasekai.sagernet.Action
 import io.nekohasekai.sagernet.R
 import io.nekohasekai.sagernet.SagerNet
-import io.nekohasekai.sagernet.aidl.ISagerNetServiceCallback
 import io.nekohasekai.sagernet.aidl.SpeedDisplayData
-import io.nekohasekai.sagernet.aidl.TrafficData
 import io.nekohasekai.sagernet.database.DataStore
 import io.nekohasekai.sagernet.database.ProxyEntity
 import io.nekohasekai.sagernet.database.SagerDatabase
@@ -35,7 +33,7 @@ import io.nekohasekai.sagernet.utils.Theme
  * See also: https://github.com/aosp-mirror/platform_frameworks_base/commit/070d142993403cc2c42eca808ff3fafcee220ac4
  */
 class ServiceNotification(
-    private val service: BaseService.Interface, profileName: String,
+    private val service: BaseService.Interface, title: String,
     channel: String, visible: Boolean = false,
 ) : BroadcastReceiver() {
     companion object {
@@ -50,81 +48,63 @@ class ServiceNotification(
         }
     }
 
-    val showDirectSpeed = DataStore.showDirectSpeed
-
-    private val callback: ISagerNetServiceCallback by lazy {
-        object : ISagerNetServiceCallback.Stub() {
-            override fun cbSpeedUpdate(stats: SpeedDisplayData) {
-                builder.apply {
-                    if (showDirectSpeed) {
-                        val speedDetail = (service as Context).getString(
-                            R.string.speed_detail, service.getString(
-                                R.string.speed, Formatter.formatFileSize(service, stats.txRateProxy)
-                            ), service.getString(
-                                R.string.speed, Formatter.formatFileSize(service, stats.rxRateProxy)
-                            ), service.getString(
-                                R.string.speed,
-                                Formatter.formatFileSize(service, stats.txRateDirect)
-                            ), service.getString(
-                                R.string.speed,
-                                Formatter.formatFileSize(service, stats.rxRateDirect)
-                            )
-                        )
-                        setStyle(NotificationCompat.BigTextStyle().bigText(speedDetail))
-                        setContentText(speedDetail)
-                    } else {
-                        val speedSimple = (service as Context).getString(
-                            R.string.traffic, service.getString(
-                                R.string.speed, Formatter.formatFileSize(service, stats.txRateProxy)
-                            ), service.getString(
-                                R.string.speed, Formatter.formatFileSize(service, stats.rxRateProxy)
-                            )
-                        )
-                        setContentText(speedSimple)
-                    }
-                    setSubText(
-                        service.getString(
-                            R.string.traffic,
-                            Formatter.formatFileSize(service, stats.txTotal),
-                            Formatter.formatFileSize(service, stats.rxTotal)
-                        )
+    fun postNotificationSpeedUpdate(stats: SpeedDisplayData) {
+        builder.apply {
+            if (showDirectSpeed) {
+                val speedDetail = (service as Context).getString(
+                    R.string.speed_detail, service.getString(
+                        R.string.speed, Formatter.formatFileSize(service, stats.txRateProxy)
+                    ), service.getString(
+                        R.string.speed, Formatter.formatFileSize(service, stats.rxRateProxy)
+                    ), service.getString(
+                        R.string.speed,
+                        Formatter.formatFileSize(service, stats.txRateDirect)
+                    ), service.getString(
+                        R.string.speed,
+                        Formatter.formatFileSize(service, stats.rxRateDirect)
                     )
-                }
-                update()
+                )
+                setStyle(NotificationCompat.BigTextStyle().bigText(speedDetail))
+                setContentText(speedDetail)
+            } else {
+                val speedSimple = (service as Context).getString(
+                    R.string.traffic, service.getString(
+                        R.string.speed, Formatter.formatFileSize(service, stats.txRateProxy)
+                    ), service.getString(
+                        R.string.speed, Formatter.formatFileSize(service, stats.rxRateProxy)
+                    )
+                )
+                setContentText(speedSimple)
             }
-
-            override fun cbTrafficUpdate(stats: TrafficData?) {
-            }
-
-            override fun stateChanged(state: Int, profileName: String?, msg: String?) {
-                if (state == -1) {
-                    builder.setContentTitle(profileName)
-                }
-            }
-
-            override fun missingPlugin(profileName: String?, pluginName: String?) {
-            }
-
-            override fun routeAlert(type: Int, routeName: String?) {
-            }
-
-            override fun updateWakeLockStatus(acquired: Boolean) {
-                updateActions(acquired)
-                builder.priority =
-                    if (acquired) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_LOW
-                update()
-            }
-
-            override fun cbLogUpdate(str: String?) {
-            }
+            setSubText(
+                service.getString(
+                    R.string.traffic,
+                    Formatter.formatFileSize(service, stats.txTotal),
+                    Formatter.formatFileSize(service, stats.rxTotal)
+                )
+            )
         }
+        update()
     }
-    private var callbackRegistered = false
+
+    fun postNotificationTitle(newTitle: String) {
+        builder.setContentTitle(newTitle)
+        update()
+    }
+
+    fun postNotificationWakeLockStatus(acquired: Boolean) {
+        updateActions()
+        builder.priority =
+            if (acquired) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_LOW
+        update()
+    }
+
+    private val showDirectSpeed = DataStore.showDirectSpeed
 
     private val builder = NotificationCompat.Builder(service as Context, channel)
         .setWhen(0)
         .setTicker(service.getString(R.string.forward_success))
-        .setContentTitle(profileName)
+        .setContentTitle(title)
         .setOnlyAlertOnce(true)
         .setContentIntent(SagerNet.configureIntent(service))
         .setSmallIcon(R.drawable.ic_service_active)
@@ -133,7 +113,7 @@ class ServiceNotification(
 
     init {
         service as Context
-        updateActions(false)
+        updateActions()
 
         Theme.apply(app)
         Theme.apply(service)
@@ -147,56 +127,54 @@ class ServiceNotification(
         show()
     }
 
-    fun updateActions(wakeLockAcquired: Boolean) {
+    private fun updateActions() {
         service as Context
-
         builder.clearActions()
+
         val closeAction = NotificationCompat.Action.Builder(
             0, service.getText(R.string.stop), PendingIntent.getBroadcast(
                 service, 0, Intent(Action.CLOSE).setPackage(service.packageName), flags
             )
-        ).apply {
-            setShowsUserInterface(false)
-        }.build()
+        ).setShowsUserInterface(false).build()
         builder.addAction(closeAction)
 
         val switchAction = NotificationCompat.Action.Builder(
             0, service.getString(R.string.action_switch), PendingIntent.getActivity(
                 service, 0, Intent(service, SwitchActivity::class.java), flags
             )
-        ).apply {
-            setShowsUserInterface(false)
-        }.build()
+        ).setShowsUserInterface(false).build()
         builder.addAction(switchAction)
 
-        val wakeLockAction = NotificationCompat.Action.Builder(
-            0,
-            service.getText(if (!wakeLockAcquired) R.string.acquire_wake_lock else R.string.release_wake_lock),
+        val resetUpstreamAction = NotificationCompat.Action.Builder(
+            0, service.getString(R.string.reset_connections),
             PendingIntent.getBroadcast(
-                service,
-                0,
-                Intent(Action.SWITCH_WAKE_LOCK).setPackage(service.packageName),
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+                service, 0, Intent(Action.RESET_UPSTREAM_CONNECTIONS), flags
             )
-        ).apply {
-            setShowsUserInterface(false)
-        }.build()
-        builder.addAction(wakeLockAction)
+        ).setShowsUserInterface(false).build()
+        builder.addAction(resetUpstreamAction)
+
+//        val wakeLockAction = NotificationCompat.Action.Builder(
+//            0,
+//            service.getText(if (!wakeLockAcquired) R.string.acquire_wake_lock else R.string.release_wake_lock),
+//            PendingIntent.getBroadcast(
+//                service,
+//                0,
+//                Intent(Action.SWITCH_WAKE_LOCK).setPackage(service.packageName),
+//                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+//            )
+//        ).setShowsUserInterface(false).build()
+//        builder.addAction(wakeLockAction)
     }
 
     override fun onReceive(context: Context, intent: Intent) {
         if (service.data.state == BaseService.State.Connected) updateCallback(intent.action == Intent.ACTION_SCREEN_ON)
     }
 
+    var listenPostSpeed = false
+
     private fun updateCallback(screenOn: Boolean) {
         if (DataStore.speedInterval == 0) return
-        if (screenOn) {
-            service.data.binder.registerCallback(callback)
-            callbackRegistered = true
-        } else if (callbackRegistered) {    // unregister callback to save battery
-            service.data.binder.unregisterCallback(callback)
-            callbackRegistered = false
-        }
+        listenPostSpeed = screenOn
     }
 
     private fun show() = (service as Service).startForeground(notificationId, builder.build())

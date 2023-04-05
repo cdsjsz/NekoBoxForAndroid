@@ -1,7 +1,6 @@
 package libcore
 
 import (
-	"io"
 	"libcore/device"
 	"os"
 	"path/filepath"
@@ -62,7 +61,7 @@ func InitCore(process, cachePath, internalAssets, externalAssets string,
 		maxLogSizeKb = 50
 	}
 	neko_log.LogWriterDisable = !logEnable
-	neko_log.NB4AGuiLogWriter = iif.(io.Writer)
+	// neko_log.NB4AGuiLogWriter = iif.(io.Writer)
 	neko_log.SetupLog(int(maxLogSizeKb)*1024, filepath.Join(cachePath, "neko.log"))
 
 	// Set up some component
@@ -75,11 +74,9 @@ func InitCore(process, cachePath, internalAssets, externalAssets string,
 
 		if time.Now().Unix() >= GetExpireTime() {
 			outdated = "Your version is too old! Please update!! 版本太旧，请升级！"
-		} else if time.Now().Unix() < (GetBuildTime() - 86400) {
-			outdated = "Wrong system time! 系统时间错误！"
 		}
 
-		// Extract assets
+		// bg
 		if isBgProcess {
 			extractAssets()
 		}

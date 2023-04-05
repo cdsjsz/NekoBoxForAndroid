@@ -1,7 +1,5 @@
 package io.nekohasekai.sagernet.bg.proto
 
-import io.nekohasekai.sagernet.ktx.onIoDispatcher
-
 class TrafficUpdater(
     private val box: libcore.BoxInstance,
     val items: List<TrafficLooperData>, // contain "bypass"
@@ -15,9 +13,10 @@ class TrafficUpdater(
         var txRate: Long = 0,
         var rxRate: Long = 0,
         var lastUpdate: Long = 0,
+        var ignore: Boolean = false,
     )
 
-    private suspend fun updateOne(item: TrafficLooperData): TrafficLooperData {
+    private fun updateOne(item: TrafficLooperData): TrafficLooperData {
         // last update
         val now = System.currentTimeMillis()
         val interval = now - item.lastUpdate
@@ -28,12 +27,8 @@ class TrafficUpdater(
         }
 
         // query
-        var tx = 0L
-        var rx = 0L
-        onIoDispatcher {
-            tx = box.queryStats(item.tag, "uplink")
-            rx = box.queryStats(item.tag, "downlink")
-        }
+        val tx = box.queryStats(item.tag, "uplink")
+        val rx = box.queryStats(item.tag, "downlink")
 
         // add diff
         item.rx += rx
@@ -54,6 +49,7 @@ class TrafficUpdater(
     suspend fun updateAll() {
         val updated = mutableMapOf<String, TrafficLooperData>() // diffs
         items.forEach { item ->
+            if (item.ignore) return@forEach
             var diff = updated[item.tag]
             // query a tag only once
             if (diff == null) {

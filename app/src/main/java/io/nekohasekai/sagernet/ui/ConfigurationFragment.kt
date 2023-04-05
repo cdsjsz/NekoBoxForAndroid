@@ -225,51 +225,52 @@ class ConfigurationFragment @JvmOverloads constructor(
         return super.onKeyDown(ketCode, event)
     }
 
-    val importFile = registerForActivityResult(ActivityResultContracts.GetContent()) { file ->
-        if (file != null) runOnDefaultDispatcher {
-            try {
-                val fileName = requireContext().contentResolver.query(file, null, null, null, null)
-                    ?.use { cursor ->
-                        cursor.moveToFirst()
-                        cursor.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME)
-                            .let(cursor::getString)
+    private val importFile =
+        registerForActivityResult(ActivityResultContracts.GetContent()) { file ->
+            if (file != null) runOnDefaultDispatcher {
+                try {
+                    val fileName =
+                        requireContext().contentResolver.query(file, null, null, null, null)
+                            ?.use { cursor ->
+                                cursor.moveToFirst()
+                                cursor.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME)
+                                    .let(cursor::getString)
+                            }
+                    val proxies = mutableListOf<AbstractBean>()
+                    if (fileName != null && fileName.endsWith(".zip")) {
+                        // try parse wireguard zip
+                        val zip =
+                            ZipInputStream(requireContext().contentResolver.openInputStream(file)!!)
+                        while (true) {
+                            val entry = zip.nextEntry ?: break
+                            if (entry.isDirectory) continue
+                            val fileText = zip.bufferedReader().readText()
+                            RawUpdater.parseRaw(fileText, entry.name)
+                                ?.let { pl -> proxies.addAll(pl) }
+                            zip.closeEntry()
+                        }
+                        zip.closeQuietly()
+                    } else {
+                        val fileText =
+                            requireContext().contentResolver.openInputStream(file)!!.use {
+                                it.bufferedReader().readText()
+                            }
+                        RawUpdater.parseRaw(fileText, fileName ?: "")
+                            ?.let { pl -> proxies.addAll(pl) }
                     }
-
-                val proxies = mutableListOf<AbstractBean>()
-                if (fileName != null && fileName.endsWith(".zip")) {
-                    // try parse wireguard zip
-
-                    val zip =
-                        ZipInputStream(requireContext().contentResolver.openInputStream(file)!!)
-                    while (true) {
-                        val entry = zip.nextEntry ?: break
-                        if (entry.isDirectory) continue
-                        val fileText = zip.bufferedReader().readText()
-                        RawUpdater.parseRaw(fileText)?.let { pl -> proxies.addAll(pl) }
-                        zip.closeEntry()
+                    if (proxies.isEmpty()) onMainDispatcher {
+                        snackbar(getString(R.string.no_proxies_found_in_file)).show()
+                    } else import(proxies)
+                } catch (e: SubscriptionFoundException) {
+                    (requireActivity() as MainActivity).importSubscription(Uri.parse(e.link))
+                } catch (e: Exception) {
+                    Logs.w(e)
+                    onMainDispatcher {
+                        snackbar(e.readableMessage).show()
                     }
-                    zip.closeQuietly()
-                } else {
-                    val fileText = requireContext().contentResolver.openInputStream(file)!!.use {
-                        it.bufferedReader().readText()
-                    }
-                    RawUpdater.parseRaw(fileText)?.let { pl -> proxies.addAll(pl) }
-                }
-
-                if (proxies.isEmpty()) onMainDispatcher {
-                    snackbar(getString(R.string.no_proxies_found_in_file)).show()
-                } else import(proxies)
-            } catch (e: SubscriptionFoundException) {
-                (requireActivity() as MainActivity).importSubscription(Uri.parse(e.link))
-            } catch (e: Exception) {
-                Logs.w(e)
-
-                onMainDispatcher {
-                    snackbar(e.readableMessage).show()
                 }
             }
         }
-    }
 
     suspend fun import(proxies: List<AbstractBean>) {
         val targetId = DataStore.selectedGroupForImport()
@@ -440,6 +441,57 @@ class ConfigurationFragment @JvmOverloads constructor(
                         onMainDispatcher {
                             MaterialAlertDialogBuilder(requireContext()).setTitle(R.string.confirm)
                                 .setMessage(R.string.delete_confirm_prompt)
+                                .setPositiveButton(R.string.yes) { _, _ ->
+                                    for (profile in toClear) {
+                                        adapter.groupFragments[DataStore.selectedGroup]?.adapter?.apply {
+                                            val index = configurationIdList.indexOf(profile.id)
+                                            if (index >= 0) {
+                                                configurationIdList.removeAt(index)
+                                                configurationList.remove(profile.id)
+                                                notifyItemRemoved(index)
+                                            }
+                                        }
+                                    }
+                                    runOnDefaultDispatcher {
+                                        for (profile in toClear) {
+                                            ProfileManager.deleteProfile2(
+                                                profile.groupId, profile.id
+                                            )
+                                        }
+                                    }
+                                }
+                                .setNegativeButton(R.string.no, null)
+                                .show()
+                        }
+                    }
+                }
+            }
+            R.id.action_remove_duplicate -> {
+                runOnDefaultDispatcher {
+                    val profiles = SagerDatabase.proxyDao.getByGroup(DataStore.currentGroupId())
+                    val toClear = mutableListOf<ProxyEntity>()
+                    val uniqueProxies = LinkedHashSet<Protocols.Deduplication>()
+                    for (pf in profiles) {
+                        val proxy = Protocols.Deduplication(pf.requireBean(), pf.displayType())
+                        if (!uniqueProxies.add(proxy)) {
+                            toClear += pf
+                        }
+                    }
+                    if (toClear.isNotEmpty()) {
+                        onMainDispatcher {
+                            MaterialAlertDialogBuilder(requireContext()).setTitle(R.string.confirm)
+                                .setMessage(
+                                    getString(R.string.delete_confirm_prompt) + "\n" +
+                                            toClear.mapIndexedNotNull { index, proxyEntity ->
+                                                if (index < 20) {
+                                                    proxyEntity.displayName()
+                                                } else if (index == 20) {
+                                                    "......"
+                                                } else {
+                                                    null
+                                                }
+                                            }.joinToString("\n")
+                                )
                                 .setPositiveButton(R.string.yes) { _, _ ->
                                     for (profile in toClear) {
                                         adapter.groupFragments[DataStore.selectedGroup]?.adapter?.apply {

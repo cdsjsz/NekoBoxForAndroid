@@ -13,7 +13,6 @@ import io.nekohasekai.sagernet.aidl.ISagerNetService
 import io.nekohasekai.sagernet.aidl.ISagerNetServiceCallback
 import io.nekohasekai.sagernet.bg.proto.ProxyInstance
 import io.nekohasekai.sagernet.database.DataStore
-import io.nekohasekai.sagernet.database.ProxyEntity
 import io.nekohasekai.sagernet.database.SagerDatabase
 import io.nekohasekai.sagernet.ktx.*
 import io.nekohasekai.sagernet.plugin.PluginManager
@@ -23,6 +22,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import libcore.Libcore
 import moe.matsuri.nb4a.Protocols
+import moe.matsuri.nb4a.utils.Util
 import java.net.UnknownHostException
 
 class BaseService {
@@ -45,11 +45,19 @@ class BaseService {
         var proxy: ProxyInstance? = null
         var notification: ServiceNotification? = null
 
-        val receiver = broadcastReceiver { _, intent ->
+        val receiver = broadcastReceiver { ctx, intent ->
             when (intent.action) {
                 Intent.ACTION_SHUTDOWN -> service.persistStats()
                 Action.RELOAD -> service.reload()
-                Action.SWITCH_WAKE_LOCK -> runOnDefaultDispatcher { service.switchWakeLock() }
+                // Action.SWITCH_WAKE_LOCK -> runOnDefaultDispatcher { service.switchWakeLock() }
+                Action.RESET_UPSTREAM_CONNECTIONS -> runOnDefaultDispatcher {
+                    Libcore.resetAllConnections(true)
+                    runOnMainDispatcher {
+                        Util.collapseStatusBar(ctx)
+                        Toast.makeText(ctx, "Reset upstream connections done", Toast.LENGTH_SHORT)
+                            .show()
+                    }
+                }
                 else -> service.stopRunner()
             }
         }
@@ -73,20 +81,24 @@ class BaseService {
             }
         }
 
+        val callbackIdMap = mutableMapOf<ISagerNetServiceCallback, Int>()
+
         override val coroutineContext = Dispatchers.Main.immediate + Job()
 
         override fun getState(): Int = (data?.state ?: State.Idle).ordinal
         override fun getProfileName(): String = data?.proxy?.profile?.displayName() ?: "Idle"
 
-        override fun registerCallback(cb: ISagerNetServiceCallback) {
-            callbacks.register(cb)
-            cb.updateWakeLockStatus(data?.proxy?.service?.wakeLock != null)
+        override fun registerCallback(cb: ISagerNetServiceCallback, id: Int) {
+            if (!callbackIdMap.contains(cb)) {
+                callbacks.register(cb)
+            }
+            callbackIdMap[cb] = id
         }
 
-        private val boardcastMutex = Mutex()
+        private val broadcastMutex = Mutex()
 
         suspend fun broadcast(work: (ISagerNetServiceCallback) -> Unit) {
-            boardcastMutex.withLock {
+            broadcastMutex.withLock {
                 val count = callbacks.beginBroadcast()
                 try {
                     repeat(count) {
@@ -103,6 +115,7 @@ class BaseService {
         }
 
         override fun unregisterCallback(cb: ISagerNetServiceCallback) {
+            callbackIdMap.remove(cb)
             callbacks.unregister(cb)
         }
 
@@ -155,9 +168,8 @@ class BaseService {
                     val success = data.proxy!!.box.selectOutbound(tag)
                     if (success) runOnDefaultDispatcher {
                         data.proxy!!.looper?.selectMain(ent.id)
-                        data.binder.broadcast {
-                            it.stateChanged(-1, ServiceNotification.genTitle(ent), null)
-                        }
+                        val title = ServiceNotification.genTitle(ent)
+                        data.notification?.postNotificationTitle(title)
                     }
                 }
                 return
@@ -246,6 +258,9 @@ class BaseService {
         suspend fun preInit() {
             DefaultNetworkListener.start(this) {
                 SagerNet.connectivity.getLinkProperties(it)?.also { link ->
+                    SagerNet.underlyingNetwork = it
+                    DataStore.vpnService?.updateUnderlyingNetwork()
+                    //
                     val oldName = upstreamInterfaceName
                     if (oldName != link.interfaceName) {
                         upstreamInterfaceName = link.interfaceName
@@ -264,14 +279,10 @@ class BaseService {
             wakeLock?.apply {
                 release()
                 wakeLock = null
-                data.binder.broadcast {
-                    it.updateWakeLockStatus(false)
-                }
+                data.notification?.postNotificationWakeLockStatus(false)
             } ?: apply {
                 acquireWakeLock()
-                data.binder.broadcast {
-                    it.updateWakeLockStatus(true)
-                }
+                data.notification?.postNotificationWakeLockStatus(true)
             }
         }
 
@@ -283,13 +294,9 @@ class BaseService {
 
             if (DataStore.acquireWakeLock) {
                 acquireWakeLock()
-                data.binder.broadcast {
-                    it.updateWakeLockStatus(true)
-                }
+                data.notification?.postNotificationWakeLockStatus(true)
             } else {
-                data.binder.broadcast {
-                    it.updateWakeLockStatus(false)
-                }
+                data.notification?.postNotificationWakeLockStatus(false)
             }
         }
 
@@ -313,7 +320,8 @@ class BaseService {
                     addAction(Action.RELOAD)
                     addAction(Intent.ACTION_SHUTDOWN)
                     addAction(Action.CLOSE)
-                    addAction(Action.SWITCH_WAKE_LOCK)
+                    // addAction(Action.SWITCH_WAKE_LOCK)
+                    addAction(Action.RESET_UPSTREAM_CONNECTIONS)
                 }, "$packageName.SERVICE", null)
                 data.closeReceiverRegistered = true
             }
