@@ -101,7 +101,7 @@ fun buildConfig(
     val globalOutbounds = HashMap<Long, String>()
     val selectorNames = ArrayList<String>()
     val group = SagerDatabase.groupDao.getById(proxy.groupId)
-    var optionsToMerge = ""
+    val optionsToMerge = proxy.requireBean().customConfigJson ?: ""
 
     fun ProxyEntity.resolveChainInternal(): MutableList<ProxyEntity> {
         val bean = requireBean()
@@ -424,9 +424,6 @@ fun buildConfig(
                     if (bean.customOutboundJson.isNotBlank()) {
                         mergeJSON(bean.customOutboundJson, currentOutbound)
                     }
-                    if (index == 0 && bean.customConfigJson.isNotBlank()) {
-                        optionsToMerge = bean.customConfigJson
-                    }
                 }
 
                 pastEntity?.requireBean()?.apply {
@@ -615,11 +612,7 @@ fun buildConfig(
                 tag = TAG_DNS_IN
                 listen = bind
                 listen_port = DataStore.localDNSPort
-                override_address = if (!remoteDns.first().isIpAddress()) {
-                    "8.8.8.8"
-                } else {
-                    remoteDns.first()
-                }
+                override_address = "8.8.8.8"
                 override_port = 53
             })
 
@@ -634,28 +627,18 @@ fun buildConfig(
             directDNS = listOf(LOCAL_DNS_SERVER)
         }
 
-        // routing for DNS server
-        for (dns in remoteDns) {
-            if (!dns.isIpAddress()) continue
-            route.rules.add(Rule_DefaultOptions().apply {
-                outbound = TAG_PROXY
-                ip_cidr = listOf(dns)
-            })
-        }
-
-        for (dns in directDNS) {
-            if (!dns.isIpAddress()) continue
-            route.rules.add(Rule_DefaultOptions().apply {
-                outbound = TAG_DIRECT
-                ip_cidr = listOf(dns)
-            })
-        }
-
         // Bypass Lookup for the first profile
         bypassDNSBeans.forEach {
             var serverAddr = it.serverAddress
             if (it is HysteriaBean && it.isMultiPort()) {
                 serverAddr = it.serverAddress.substringBeforeLast(":")
+            }
+            if (it is ConfigBean) {
+                var config = mutableMapOf<String, Any>()
+                config = gson.fromJson(it.config, config.javaClass)
+                config["server"]?.apply {
+                    serverAddr = toString()
+                }
             }
 
             if (!serverAddr.isIpAddress()) {
@@ -676,10 +659,9 @@ fun buildConfig(
         }
 
         // remote dns obj
-        remoteDns.firstOrNull()?.apply {
-            val d = this
+        remoteDns.firstOrNull().let {
             dns.servers.add(DNSServerOptions().apply {
-                address = d
+                address = it ?: throw Exception("No remote DNS, check your settings!")
                 tag = "dns-remote"
                 address_resolver = "dns-direct"
                 applyDNSNetworkSettings(false)
@@ -687,12 +669,11 @@ fun buildConfig(
         }
 
         // add directDNS objects here
-        directDNS.firstOrNull()?.apply {
-            val d = this
+        directDNS.firstOrNull().let {
             dns.servers.add(DNSServerOptions().apply {
-                address = d
+                address = it ?: throw Exception("No direct DNS, check your settings!")
                 tag = "dns-direct"
-                detour = "direct"
+                detour = TAG_DIRECT
                 address_resolver = "dns-local"
                 applyDNSNetworkSettings(true)
             })
@@ -700,7 +681,7 @@ fun buildConfig(
         dns.servers.add(DNSServerOptions().apply {
             address = LOCAL_DNS_SERVER
             tag = "dns-local"
-            detour = "direct"
+            detour = TAG_DIRECT
         })
         dns.servers.add(DNSServerOptions().apply {
             address = "rcode://success"
@@ -770,13 +751,18 @@ fun buildConfig(
             }
         }
 
-        // Disable DNS for test
         if (forTest) {
-            dns.servers.clear()
-            dns.rules.clear()
-        }
-
-        if (!forTest) {
+            // Disable DNS for test
+            dns.servers = listOf(
+                DNSServerOptions().apply {
+                    address = LOCAL_DNS_SERVER
+                    tag = "dns-local"
+                    detour = TAG_DIRECT
+                }
+            ) // Always use system DNS for urlTest
+            dns.rules = listOf()
+        } else {
+            // built-in DNS rules
             route.rules.add(0, Rule_DefaultOptions().apply {
                 inbound = listOf(TAG_DNS_IN)
                 outbound = TAG_DNS_OUT
@@ -802,6 +788,13 @@ fun buildConfig(
                 server = "dns-block"
                 disable_cache = true
             })
+            // force bypass
+            if (domainListDNSDirectForce.isNotEmpty()) {
+                dns.rules.add(0, DNSRule_DefaultOptions().apply {
+                    makeSingBoxRule(domainListDNSDirectForce.toHashSet().toList())
+                    server = "dns-direct"
+                })
+            }
         }
 
         // fakedns obj
@@ -819,14 +812,6 @@ fun buildConfig(
                 inbound = listOf("tun-in")
                 server = "dns-fake"
                 disable_cache = true
-            })
-        }
-
-        // force bypass
-        if (domainListDNSDirectForce.isNotEmpty()) {
-            dns.rules.add(0, DNSRule_DefaultOptions().apply {
-                makeSingBoxRule(domainListDNSDirectForce.toHashSet().toList())
-                server = "dns-direct"
             })
         }
     }.let {
